@@ -7242,7 +7242,11 @@ bunAdapterTest(
       CONTROL_ALIAS: path.join(project, ".smithers", "workflows", "continued.tsx"),
       OPENAI_API_KEY: "unrelated-provider-key"
     };
-    for (const additions of [{}, { PATH: admittedPath, PI_CODING_AGENT_DIR: piHome }]) {
+    for (const additions of [
+      {},
+      { PATH: admittedPath, PI_CODING_AGENT_DIR: piHome },
+      { PATH: externalBin, PI_CODING_AGENT_DIR: piHome }
+    ]) {
       const child = { ...source, ...workflowControlChildEnvironment(additions, source) };
       assert.equal(child.PATH, admittedPath);
       assert.equal(child.PI_CODING_AGENT_DIR, piHome);

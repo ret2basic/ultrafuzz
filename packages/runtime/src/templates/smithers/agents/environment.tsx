@@ -114,8 +114,16 @@ export function workflowControlChildEnvironment(
     if (value !== undefined && aliasesControl(name, value)) child[name] = "";
   }
   for (const [name, value] of Object.entries(additions)) {
-    if (value !== undefined) child[name] = value;
+    if (value === undefined) continue;
+    // The controller has already removed target-local command directories and
+    // prepended the run-owned trusted CLI/Forge launchers.  Provider adapters
+    // may return their own generic PATH; accepting it here silently drops
+    // those launchers, so schema-backed agents cannot execute the exact
+    // validation command rendered in their prompt.
+    if (name === "PATH" && source.PATH !== undefined) continue;
+    child[name] = value;
   }
+  if (source.PATH !== undefined) child.PATH = source.PATH;
   if (route !== undefined) restoreRouteScopedAllowlistedCredentials(child, source, route.agent);
   for (const name of CONTROLLER_ONLY_ENVIRONMENT_VARIABLES) child[name] = "";
   for (const [name, value] of Object.entries(child)) {
