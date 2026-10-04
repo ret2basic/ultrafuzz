@@ -41,28 +41,57 @@ export class CompatibleCodexAgent extends SmithersCodexAgent {
       throw error;
     }
     const sanitizedCommand = { ...command, env };
+    let args: string[];
+    try {
+      args = withCodexToolEnvironment(command.args, env);
+    } catch (error) {
+      await command.cleanup?.();
+      throw error;
+    }
     const directories = this.opts.addDir ?? [];
     if (typeof params.options?.resumeSession === "string" || directories.length <= 1) {
-      return sanitizedCommand;
+      return { ...sanitizedCommand, args };
     }
-    const addDirIndex = command.args.indexOf("--add-dir");
+    const addDirIndex = args.indexOf("--add-dir");
     if (addDirIndex < 0) {
-      return sanitizedCommand;
+      return { ...sanitizedCommand, args };
     }
     const replacement = directories.flatMap((directory) => ["--add-dir", directory]);
     return {
       ...sanitizedCommand,
-      args: [
-        ...command.args.slice(0, addDirIndex),
-        ...replacement,
-        ...command.args.slice(addDirIndex + 1 + directories.length)
-      ]
+      args: [...args.slice(0, addDirIndex), ...replacement, ...args.slice(addDirIndex + 1 + directories.length)]
     };
   }
 
   protected workflowDataGovernanceAgent(): "CodexAgent" | "OpenRouterAgent" {
     return "CodexAgent";
   }
+}
+
+/**
+ * Codex normally permits a login shell for tool calls. A login shell may
+ * replace the controller-admitted PATH from `/etc/profile` or the user's
+ * profile, which makes the run-owned validator disappear after its preflight
+ * succeeded. Bind the exact sanitized child PATH at the CLI's highest config
+ * precedence and disable login-shell profile loading for every fresh and
+ * resumed task.
+ */
+function withCodexToolEnvironment(args: readonly string[], env: Readonly<Record<string, string>>): string[] {
+  if (args[0] !== "exec") {
+    throw new Error("CodexAgent command is missing the exec boundary");
+  }
+  const commandPath = env.PATH;
+  if (commandPath === undefined || commandPath.trim() === "") {
+    throw new Error("CodexAgent command PATH is missing after workflow admission");
+  }
+  return [
+    "exec",
+    "-c",
+    "allow_login_shell=false",
+    "-c",
+    `shell_environment_policy.set.PATH=${JSON.stringify(commandPath)}`,
+    ...args.slice(1)
+  ];
 }
 
 export function createCodexAgent(options: CodexTaskOptions = {}): SmithersCodexAgent {

@@ -4080,6 +4080,15 @@ bunAdapterTest(
     const agent = new CompatibleCodexAgent({ addDir: ["/tmp/artifacts", "/tmp/dependency artifacts"] });
 
     const fresh = await agent.buildCommand({ prompt: "test", cwd: project, options: {} });
+    const freshPath = fresh.env?.PATH;
+    assert.ok(freshPath);
+    assert.deepEqual(fresh.args.slice(0, 5), [
+      "exec",
+      "-c",
+      "allow_login_shell=false",
+      "-c",
+      `shell_environment_policy.set.PATH=${JSON.stringify(freshPath)}`
+    ]);
     const firstAddDir = fresh.args.indexOf("--add-dir");
     assert.deepEqual(fresh.args.slice(firstAddDir, firstAddDir + 4), [
       "--add-dir",
@@ -4095,7 +4104,16 @@ bunAdapterTest(
       cwd: project,
       options: { resumeSession: "session-123" }
     });
+    const resumedPath = resumed.env?.PATH;
+    assert.ok(resumedPath);
     assert.equal(resumed.args.includes("--add-dir"), false);
+    assert.deepEqual(resumed.args.slice(0, 5), [
+      "exec",
+      "-c",
+      "allow_login_shell=false",
+      "-c",
+      `shell_environment_policy.set.PATH=${JSON.stringify(resumedPath)}`
+    ]);
     await resumed.cleanup?.();
   }
 );
