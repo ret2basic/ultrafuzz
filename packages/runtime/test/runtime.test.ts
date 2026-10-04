@@ -3931,6 +3931,10 @@ bunAdapterTest("planned routes equal final generated-adapter validation", { time
   try {
     const codexDestination = modelDestination("CodexAgent", config, { ULTRAFUZZ_PROVIDER_HOME_ROOT: homes });
     fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [codexDestination] }));
+    fs.appendFileSync(
+      path.join(codexHome, "config.toml"),
+      '\n[projects."/home/operator/target"]\ntrust_level = "trusted"\n'
+    );
     const { CompatibleCodexAgent, workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project),
       codex = await new CompatibleCodexAgent({
         configDir: codexHome,

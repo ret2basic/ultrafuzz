@@ -280,11 +280,8 @@ function effectiveWorkflowDataRoute(
     const configPath = path.join(route.configDir, route.agent === "ClaudeAgent" ? "settings.json" : "config.toml");
     if (existsSync(configPath)) {
       const bytes = readRegularFileSnapshot(configPath, 1024 * 1024);
-      const affectsRoute =
-        route.agent === "ClaudeAgent"
-          ? claudeSettingsAffectRoute(bytes)
-          : route.agent !== "CodexAgent" || codexConfigAffectsRoute(bytes.toString("utf8"));
-      if (affectsRoute) configDigest = sha256(bytes);
+      if (route.agent === "CodexAgent") configDigest = codexConfigRouteDigest(bytes.toString("utf8"));
+      else if (route.agent !== "ClaudeAgent" || claudeSettingsAffectRoute(bytes)) configDigest = sha256(bytes);
     }
   }
   const digest =
@@ -313,12 +310,30 @@ function effectiveWorkflowDataRoute(
  * redirect traffic — a `model_provider` selection, a `[model_providers…]`
  * table, or a `base_url` assignment — participates in the route digest.
  */
-function codexConfigAffectsRoute(text: string): boolean {
-  return (
-    /(?:^|\n)\s*(?:model_provider|"model_provider"|'model_provider')\s*=/u.test(text) ||
-    /(?:^|\n)\s*\[[^\]\n]*model_providers[^\]\n]*\]/u.test(text) ||
-    /(?:^|\n)\s*(?:base_url|"base_url"|'base_url')\s*=/u.test(text)
-  );
+function codexConfigRouteDigest(text: string): string | undefined {
+  const projection: string[] = [];
+  let routeTable = false;
+  for (const rawLine of text.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (line === "" || line.startsWith("#")) continue;
+    const table = /^(\[\[?)([^\]\n]+)(\]\]?)\s*(?:#.*)?$/u.exec(line);
+    if (table !== null) {
+      const name = table[2]?.trim() ?? "";
+      routeTable = /^(?:model_providers|"model_providers"|'model_providers')(?:\.|$)/u.test(name);
+      if (routeTable) projection.push(`table:${line}`);
+      continue;
+    }
+    if (routeTable) {
+      projection.push(`entry:${line}`);
+      continue;
+    }
+    if (
+      /^(?:model_provider|"model_provider"|'model_provider'|base_url|"base_url"|'base_url')\s*=/u.test(line) ||
+      /^(?:model_providers|"model_providers"|'model_providers')\s*\./u.test(line)
+    )
+      projection.push(`root:${line}`);
+  }
+  return projection.length > 0 ? sha256(projection.join("\n")) : undefined;
 }
 
 function claudeSettingsAffectRoute(bytes: Buffer): boolean {
