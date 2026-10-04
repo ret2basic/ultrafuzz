@@ -298,7 +298,10 @@ export async function diagnoseRun(input: WorkflowRunQueryInput) {
   }
   const sync = await synchronizeLinkedWorkflowRun(
     { projectRoot, runId: input.runId, env: input.env },
-    { deadlineMs: observationSynchronizationDeadline(input.env) }
+    {
+      deadlineMs: observationSynchronizationDeadline(input.env),
+      completeTerminalSynchronization: true
+    }
   );
   const syncDiagnostics = downgradedSyncDiagnostics(sync);
   const snapshot = await runSmithersInspectionCommand({

@@ -21377,6 +21377,45 @@ test("syncRun honors cancellation and an overall deadline before terminal synchr
   );
   assert.equal(clockReads, 2);
   assert.equal(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8"), before);
+
+  const convergenceProject = tempProject();
+  initProject({ projectRoot: convergenceProject, force: true });
+  writeSmallTopology(convergenceProject, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const convergenceWorkflowRunId = "ultrafuzz-terminal-convergence";
+  const convergenceEnv = fakeLifecycleSmithersEnv(convergenceProject, {
+    inspect: workflowInspect({
+      workflowRunId: convergenceWorkflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(convergenceWorkflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const convergenceRun = await startRun({
+    projectRoot: convergenceProject,
+    runId: "terminal-convergence",
+    model: "gpt-5.5",
+    env: convergenceEnv
+  });
+  assert.equal(convergenceRun.ok, true, JSON.stringify(convergenceRun.diagnostics));
+  writeRequiredArtifactSet(convergenceRun.value!.run_root, "project-discovery", [
+    GENERIC_RUNTIME_MARKDOWN_PATH,
+    "findings.json"
+  ]);
+  let convergenceClockReads = 0;
+  const converged = await syncRun(
+    { projectRoot: convergenceProject, runId: "terminal-convergence", env: convergenceEnv },
+    {
+      now: () => now + (convergenceClockReads++ === 0 ? 0 : 60_000),
+      deadlineMs: now + 30_000,
+      completeTerminalSynchronization: true
+    }
+  );
+  assert.equal(converged.ok, true, JSON.stringify(converged.diagnostics));
+  assert.equal(converged.value?.status, "succeeded");
+  assert.ok(convergenceClockReads > 1);
 });
 
 test("syncRun aborts or times out a blocked inspection child without durable mutation", async () => {

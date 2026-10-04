@@ -159,7 +159,10 @@ export async function getRunStatus(input: {
   }
   const sync = await synchronizeLinkedWorkflowRun(
     { projectRoot, runId: input.runId, env: input.env },
-    { deadlineMs: observationSynchronizationDeadline(input.env) }
+    {
+      deadlineMs: observationSynchronizationDeadline(input.env),
+      completeTerminalSynchronization: true
+    }
   );
   const syncDiagnostics = sync.diagnostics.map((diagnostic) =>
     describeObservationSynchronizationDeadline(sync.ok ? diagnostic : { ...diagnostic, severity: "warning" as const })
@@ -371,7 +374,11 @@ async function synchronizeObservedWorkflowRun(input: SyncRunInput, runRoot: stri
   const deadlineMs = observationSynchronizationDeadline(input.env);
   try {
     const sync = await retryTransientSnapshotObservation(() =>
-      synchronizeLinkedWorkflowRun(input, { observeOnly: true, deadlineMs })
+      synchronizeLinkedWorkflowRun(input, {
+        observeOnly: true,
+        deadlineMs,
+        completeTerminalSynchronization: true
+      })
     );
     return sync.diagnostics.map((diagnostic) =>
       diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED"

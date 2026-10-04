@@ -374,6 +374,13 @@ export interface WorkflowSynchronizationControl {
   now?: () => number;
   signal?: AbortSignal;
   deadlineMs?: number;
+  /**
+   * Observation deadlines keep polling responsive while a workflow is live.
+   * Once the authoritative runner snapshot is terminal, finish the one-time
+   * durable convergence instead of leaving local state permanently stale.
+   * Cancellation remains effective throughout that convergence.
+   */
+  completeTerminalSynchronization?: boolean;
   /** Trusted transport seams for hermetic embedders and tests. */
   pricingFetch?: PricingCatalogFetch;
   pricingLookupHostname?: PricingHostnameLookup;
@@ -398,8 +405,11 @@ const MAX_OBSERVATION_SYNC_TIMEOUT_MS = 60_000;
  * CLI path that converges local run state from runner evidence and a default
  * bound that trips on slow disks or large histories would leave `status` and
  * `stats` stale by default. A positive value in milliseconds (capped at 60
- * seconds) bounds the refresh; the direct runner query then remains
- * authoritative for live health while a slow history scan surfaces a warning.
+ * seconds) bounds the refresh while the workflow remains live; the direct
+ * runner query then remains authoritative for live health while a slow history
+ * scan surfaces a warning. Observer entrypoints deliberately finish a one-time
+ * terminal projection after the runner reports a stopped state, because no
+ * later live poll could otherwise guarantee convergence.
  * `0`, `off`, and unparseable values leave the deadline unset.
  */
 export function observationSynchronizationDeadline(
@@ -1354,37 +1364,65 @@ export async function synchronizeLinkedWorkflowRun(
     ...inspectionExecutionControl(control, synchronizationNowMs)
   });
   synchronizationNowMs = synchronizationClock(control);
-  const postInspectBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationNowMs);
-  if (postInspectBudgetDiagnostic !== undefined) {
-    return { ok: false, diagnostics: [postInspectBudgetDiagnostic] };
-  }
-  if (control.allowMissingWorkflowRun === true && smithersSnapshotReportsMissingRun(inspectSnapshot)) {
-    return {
-      ok: true,
-      diagnostics: [],
-      value: {
-        run_id: layout.runId,
-        run_root: layout.root,
-        status: readRunState(layout).status,
-        workflow_run_id: evidence.smithersRunId,
-        synced_nodes: 0
-      }
-    };
-  }
+  const boundedPostInspectDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationNowMs);
   if (!inspectSnapshot.ok) {
+    if (boundedPostInspectDiagnostic !== undefined) {
+      return { ok: false, diagnostics: [boundedPostInspectDiagnostic] };
+    }
+    if (control.allowMissingWorkflowRun === true && smithersSnapshotReportsMissingRun(inspectSnapshot)) {
+      return {
+        ok: true,
+        diagnostics: [],
+        value: {
+          run_id: layout.runId,
+          run_root: layout.root,
+          status: readRunState(layout).status,
+          workflow_run_id: evidence.smithersRunId,
+          synced_nodes: 0
+        }
+      };
+    }
     return {
       ok: false,
       diagnostics: [workflowSnapshotDiagnostic(inspectSnapshot, "WORKFLOW_INSPECT_FAILED")]
     };
   }
+  let inspect: WorkflowInspect;
+  try {
+    inspect = parseInspectSnapshot(inspectSnapshot, evidence.smithersRunId);
+  } catch (error) {
+    if (boundedPostInspectDiagnostic !== undefined) {
+      return { ok: false, diagnostics: [boundedPostInspectDiagnostic] };
+    }
+    return {
+      ok: false,
+      diagnostics: [diagnosticFromError(error, "workflow", "WORKFLOW_INSPECT_INVALID")]
+    };
+  }
+  // A live workflow may be sampled again on the next bounded poll. A stopped
+  // workflow cannot make any more progress, so repeatedly abandoning its
+  // evidence/accounting projection at the same deadline leaves state.json
+  // stuck at `running` forever. Drop only the observer's wall-clock deadline
+  // after a validated terminal snapshot; an AbortSignal still cancels work.
+  const synchronizationControl =
+    control.completeTerminalSynchronization === true && workflowStopped(inspect)
+      ? { ...control, deadlineMs: undefined }
+      : control;
+  const postInspectBudgetDiagnostic =
+    synchronizationControl === control
+      ? boundedPostInspectDiagnostic
+      : synchronizationBudgetDiagnostic(synchronizationControl, synchronizationNowMs);
+  if (postInspectBudgetDiagnostic !== undefined) {
+    return { ok: false, diagnostics: [postInspectBudgetDiagnostic] };
+  }
   const eventsSnapshot = await runSmithersInspectionCommand({
     args: ["events", evidence.smithersRunId, "--limit", "100000", "--json"],
     projectRoot,
     env: linkedWorkflowExecutionEnvironment(evidence, input.env),
-    ...inspectionExecutionControl(control, synchronizationNowMs)
+    ...inspectionExecutionControl(synchronizationControl, synchronizationNowMs)
   });
-  synchronizationNowMs = synchronizationClock(control);
-  const postEventsBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationNowMs);
+  synchronizationNowMs = synchronizationClock(synchronizationControl);
+  const postEventsBudgetDiagnostic = synchronizationBudgetDiagnostic(synchronizationControl, synchronizationNowMs);
   if (postEventsBudgetDiagnostic !== undefined) {
     return { ok: false, diagnostics: [postEventsBudgetDiagnostic] };
   }
@@ -1392,10 +1430,10 @@ export async function synchronizeLinkedWorkflowRun(
     args: ["events", evidence.smithersRunId, "--type", "token", "--limit", "100000", "--json"],
     projectRoot,
     env: linkedWorkflowExecutionEnvironment(evidence, input.env),
-    ...inspectionExecutionControl(control, synchronizationNowMs)
+    ...inspectionExecutionControl(synchronizationControl, synchronizationNowMs)
   });
-  synchronizationNowMs = synchronizationClock(control);
-  const postInspectionBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationNowMs);
+  synchronizationNowMs = synchronizationClock(synchronizationControl);
+  const postInspectionBudgetDiagnostic = synchronizationBudgetDiagnostic(synchronizationControl, synchronizationNowMs);
   if (postInspectionBudgetDiagnostic !== undefined) {
     return { ok: false, diagnostics: [postInspectionBudgetDiagnostic] };
   }
@@ -1410,20 +1448,11 @@ export async function synchronizeLinkedWorkflowRun(
     return { ok: false, diagnostics };
   }
 
-  let inspect: WorkflowInspect;
-  try {
-    inspect = parseInspectSnapshot(inspectSnapshot, evidence.smithersRunId);
-  } catch (error) {
-    return {
-      ok: false,
-      diagnostics: [diagnosticFromError(error, "workflow", "WORKFLOW_INSPECT_INVALID")]
-    };
-  }
   let events: WorkflowEvent[];
   try {
     events = parseWorkflowEvents(eventsSnapshot.stdout, evidence.smithersRunId);
   } catch (error) {
-    if (control.tolerateInvalidEventStreams !== true) throw error;
+    if (synchronizationControl.tolerateInvalidEventStreams !== true) throw error;
     return {
       ok: false,
       diagnostics: [diagnosticFromError(error, "workflow", "WORKFLOW_EVENTS_INVALID")]
@@ -1433,7 +1462,7 @@ export async function synchronizeLinkedWorkflowRun(
   try {
     tokenEvents = parseWorkflowEvents(tokenEventsSnapshot.stdout, evidence.smithersRunId);
   } catch (error) {
-    if (control.tolerateInvalidEventStreams !== true) throw error;
+    if (synchronizationControl.tolerateInvalidEventStreams !== true) throw error;
     return {
       ok: false,
       diagnostics: [diagnosticFromError(error, "workflow", "WORKFLOW_TOKEN_EVENTS_INVALID")]
@@ -1448,7 +1477,7 @@ export async function synchronizeLinkedWorkflowRun(
       events,
       layout,
       env: linkedWorkflowExecutionEnvironment(evidence, input.env),
-      control
+      control: synchronizationControl
     });
   } catch (error) {
     const interrupted = synchronizationInterruptionDiagnostic(error);
@@ -1470,7 +1499,7 @@ export async function synchronizeLinkedWorkflowRun(
       events,
       attemptAuthorities,
       forbiddenSecretValues,
-      control
+      control: synchronizationControl
     });
   } catch (error) {
     const interrupted = synchronizationInterruptionDiagnostic(error);
@@ -1536,7 +1565,10 @@ export async function synchronizeLinkedWorkflowRun(
     diagnostics.push(unattributedFailure);
   }
 
-  const preAccountingBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
+  const preAccountingBudgetDiagnostic = synchronizationBudgetDiagnostic(
+    synchronizationControl,
+    synchronizationClock(synchronizationControl)
+  );
   if (preAccountingBudgetDiagnostic !== undefined) {
     return { ok: false, diagnostics: [preAccountingBudgetDiagnostic] };
   }
@@ -1547,14 +1579,17 @@ export async function synchronizeLinkedWorkflowRun(
     events: tokenEvents,
     tasks: loaded.tasks,
     attemptEvents: events,
-    control,
+    control: synchronizationControl,
     env: input.env ?? process.env
   });
   if (accountingResult.budgetDiagnostic !== undefined) {
     return { ok: false, diagnostics: [accountingResult.budgetDiagnostic] };
   }
 
-  const preFinalMutationBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
+  const preFinalMutationBudgetDiagnostic = synchronizationBudgetDiagnostic(
+    synchronizationControl,
+    synchronizationClock(synchronizationControl)
+  );
   if (preFinalMutationBudgetDiagnostic !== undefined) {
     return { ok: false, diagnostics: [preFinalMutationBudgetDiagnostic] };
   }
@@ -1569,7 +1604,10 @@ export async function synchronizeLinkedWorkflowRun(
   const previousRunStatus = stateBeforeStatusUpdate.status;
   const runStatusChanged = previousRunStatus !== finalStatus;
   if (runStatusChanged) {
-    const preStatusWriteBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
+    const preStatusWriteBudgetDiagnostic = synchronizationBudgetDiagnostic(
+      synchronizationControl,
+      synchronizationClock(synchronizationControl)
+    );
     if (preStatusWriteBudgetDiagnostic !== undefined) {
       return { ok: false, diagnostics: [preStatusWriteBudgetDiagnostic] };
     }
@@ -1603,7 +1641,7 @@ export async function synchronizeLinkedWorkflowRun(
     const recovered = {
       ...recoveryBeforeStatusUpdate,
       recovered: true,
-      recovered_at: new Date(synchronizationClock(control)).toISOString()
+      recovered_at: new Date(synchronizationClock(synchronizationControl)).toISOString()
     };
     writeRunState(
       layout,
@@ -1613,7 +1651,7 @@ export async function synchronizeLinkedWorkflowRun(
       }
     );
   }
-  const observedAtMs = synchronizationClock(control);
+  const observedAtMs = synchronizationClock(synchronizationControl);
   const workflowControl = projectWorkflowControlState({
     previousState: previousControlState,
     state: readRunState(layout),
@@ -1631,7 +1669,7 @@ export async function synchronizeLinkedWorkflowRun(
       throw new Error("workflow control reported a deadline breach without a deadline timestamp");
     }
     try {
-      assertSynchronizationBudget(control);
+      assertSynchronizationBudget(synchronizationControl);
       await requestSmithersCancel({
         smithersRunId: evidence.smithersRunId,
         projectRoot,
@@ -1645,7 +1683,10 @@ export async function synchronizeLinkedWorkflowRun(
       diagnostics.push(smithersDiagnostic(error, "WORKFLOW_DEADLINE_CANCEL_FAILED"));
     }
   }
-  const preControlMutationBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
+  const preControlMutationBudgetDiagnostic = synchronizationBudgetDiagnostic(
+    synchronizationControl,
+    synchronizationClock(synchronizationControl)
+  );
   if (preControlMutationBudgetDiagnostic !== undefined) {
     return { ok: false, diagnostics: [preControlMutationBudgetDiagnostic] };
   }
@@ -1684,7 +1725,10 @@ export async function synchronizeLinkedWorkflowRun(
     deadlineApplied ||
     stoppedObservationChanged
   ) {
-    const preEventWriteBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
+    const preEventWriteBudgetDiagnostic = synchronizationBudgetDiagnostic(
+      synchronizationControl,
+      synchronizationClock(synchronizationControl)
+    );
     if (preEventWriteBudgetDiagnostic !== undefined) {
       return { ok: false, diagnostics: [preEventWriteBudgetDiagnostic] };
     }
@@ -1720,8 +1764,8 @@ export async function synchronizeLinkedWorkflowRun(
     };
     if (!unattributedTerminalFailureRecorded(layout, payload)) {
       const preUnattributedWriteBudgetDiagnostic = synchronizationBudgetDiagnostic(
-        control,
-        synchronizationClock(control)
+        synchronizationControl,
+        synchronizationClock(synchronizationControl)
       );
       if (preUnattributedWriteBudgetDiagnostic !== undefined) {
         return { ok: false, diagnostics: [preUnattributedWriteBudgetDiagnostic] };
@@ -1740,7 +1784,7 @@ export async function synchronizeLinkedWorkflowRun(
     !hasCurrentReportPublicationStatus(layout.root, readRunState(layout))
   ) {
     try {
-      assertSynchronizationBudget(control);
+      assertSynchronizationBudget(synchronizationControl);
       // Publish only an existing agent-written report. Missing agent output is
       // a terminal reporting result, not a reason to rerun analysis.
       const report = publishBestEffortTerminalReport(layout.root, {
@@ -6157,6 +6201,10 @@ function workflowSucceeded(inspect: WorkflowInspect): boolean {
     (inspect.runState === "succeeded" || inspect.runState === "succeeded-with-failures") &&
     inspect.exhaustedLoops.length === 0
   );
+}
+
+function workflowStopped(inspect: WorkflowInspect): boolean {
+  return ["succeeded", "succeeded-with-failures", "failed", "cancelled"].includes(inspect.runState);
 }
 
 function aggregateAttemptStatuses(statuses: NodeStatus[]): NodeStatus {
