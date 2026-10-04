@@ -561,4 +561,30 @@ test("Codex CLI bookkeeping in config.toml does not change the acknowledged rout
     fs.writeFileSync(configPath, routing);
     assert.match(modelDestination("CodexAgent", config, { HOME: homes }), /^model:codex-route-/u);
   }
+
+  const routed = [
+    'model_provider = "private"',
+    'model = "glm-5.3-flash"',
+    "",
+    "[model_providers.private]",
+    'base_url = "https://gateway.example/v1"',
+    'wire_api = "responses"',
+    ""
+  ].join("\n");
+  fs.writeFileSync(configPath, routed);
+  const acknowledged = modelDestination("CodexAgent", config, { HOME: homes });
+  fs.appendFileSync(
+    configPath,
+    [
+      "[marketplaces.openai-bundled]",
+      'last_updated = "2026-10-04T00:00:00Z"',
+      "",
+      '[projects."/home/operator/target"]',
+      'trust_level = "trusted"',
+      ""
+    ].join("\n")
+  );
+  assert.equal(modelDestination("CodexAgent", config, { HOME: homes }), acknowledged);
+  fs.writeFileSync(configPath, routed.replace("gateway.example", "other.example"));
+  assert.notEqual(modelDestination("CodexAgent", config, { HOME: homes }), acknowledged);
 });

@@ -341,11 +341,8 @@ function effectiveRoute(agent: string, config: ResolvedConfig, env: NodeJS.Proce
   let configDigest: string | undefined;
   if (fs.existsSync(routeConfig)) {
     const bytes = readSinglyLinkedRegularFileSnapshotInside(home, routeConfig, 1024 * 1024, "provider route config");
-    const affectsRoute =
-      agent === "ClaudeAgent"
-        ? claudeSettingsAffectRoute(bytes)
-        : agent !== "CodexAgent" || codexConfigAffectsRoute(bytes.toString("utf8"));
-    if (affectsRoute) configDigest = hash(bytes);
+    if (agent === "CodexAgent") configDigest = codexConfigRouteDigest(bytes.toString("utf8"));
+    else if (agent !== "ClaudeAgent" || claudeSettingsAffectRoute(bytes)) configDigest = hash(bytes);
     if (configDigest !== undefined && config.execution.mode === "cloud")
       throw new Error(
         "cloud execution cannot use host provider-home routing; select and acknowledge the route through environment variables"
@@ -366,12 +363,30 @@ function effectiveRoute(agent: string, config: ResolvedConfig, env: NodeJS.Proce
  * codexProviderRouting reads — participates in the route digest. A config
  * that gains any of these after acknowledgement still fails closed.
  */
-function codexConfigAffectsRoute(text: string): boolean {
-  return (
-    /(?:^|\n)\s*(?:model_provider|"model_provider"|'model_provider')\s*=/u.test(text) ||
-    /(?:^|\n)\s*\[[^\]\n]*model_providers[^\]\n]*\]/u.test(text) ||
-    /(?:^|\n)\s*(?:base_url|"base_url"|'base_url')\s*=/u.test(text)
-  );
+function codexConfigRouteDigest(text: string): string | undefined {
+  const projection: string[] = [];
+  let routeTable = false;
+  for (const rawLine of text.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (line === "" || line.startsWith("#")) continue;
+    const table = /^(\[\[?)([^\]\n]+)(\]\]?)\s*(?:#.*)?$/u.exec(line);
+    if (table !== null) {
+      const name = table[2]?.trim() ?? "";
+      routeTable = /^(?:model_providers|"model_providers"|'model_providers')(?:\.|$)/u.test(name);
+      if (routeTable) projection.push(`table:${line}`);
+      continue;
+    }
+    if (routeTable) {
+      projection.push(`entry:${line}`);
+      continue;
+    }
+    if (
+      /^(?:model_provider|"model_provider"|'model_provider'|base_url|"base_url"|'base_url')\s*=/u.test(line) ||
+      /^(?:model_providers|"model_providers"|'model_providers')\s*\./u.test(line)
+    )
+      projection.push(`root:${line}`);
+  }
+  return projection.length > 0 ? hash(projection.join("\n")) : undefined;
 }
 function claudeSettingsAffectRoute(bytes: Buffer): boolean {
   const parsed = parseStrictJsonBytes(bytes, {
