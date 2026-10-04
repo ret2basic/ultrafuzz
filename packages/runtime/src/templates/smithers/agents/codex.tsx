@@ -72,9 +72,11 @@ export class CompatibleCodexAgent extends SmithersCodexAgent {
  * Codex normally permits a login shell for tool calls. A login shell may
  * replace the controller-admitted PATH from `/etc/profile` or the user's
  * profile, which makes the run-owned validator disappear after its preflight
- * succeeded. Bind the exact sanitized child PATH at the CLI's highest config
- * precedence and disable login-shell profile loading for every fresh and
- * resumed task.
+ * succeeded. Disable login-shell profile loading for every fresh and resumed
+ * task, while leaving PATH inherited from the sanitized child environment.
+ * Codex prepends its ephemeral built-in tools (including apply_patch) to that
+ * inherited value; overriding PATH through shell_environment_policy.set would
+ * remove those tools again.
  */
 function withCodexToolEnvironment(args: readonly string[], env: Readonly<Record<string, string>>): string[] {
   if (args[0] !== "exec") {
@@ -84,14 +86,7 @@ function withCodexToolEnvironment(args: readonly string[], env: Readonly<Record<
   if (commandPath === undefined || commandPath.trim() === "") {
     throw new Error("CodexAgent command PATH is missing after workflow admission");
   }
-  return [
-    "exec",
-    "-c",
-    "allow_login_shell=false",
-    "-c",
-    `shell_environment_policy.set.PATH=${JSON.stringify(commandPath)}`,
-    ...args.slice(1)
-  ];
+  return ["exec", "-c", "allow_login_shell=false", ...args.slice(1)];
 }
 
 export function createCodexAgent(options: CodexTaskOptions = {}): SmithersCodexAgent {

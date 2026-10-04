@@ -4082,13 +4082,11 @@ bunAdapterTest(
     const fresh = await agent.buildCommand({ prompt: "test", cwd: project, options: {} });
     const freshPath = fresh.env?.PATH;
     assert.ok(freshPath);
-    assert.deepEqual(fresh.args.slice(0, 5), [
-      "exec",
-      "-c",
-      "allow_login_shell=false",
-      "-c",
-      `shell_environment_policy.set.PATH=${JSON.stringify(freshPath)}`
-    ]);
+    assert.deepEqual(fresh.args.slice(0, 3), ["exec", "-c", "allow_login_shell=false"]);
+    assert.equal(
+      fresh.args.some((arg) => arg.startsWith("shell_environment_policy.set.PATH=")),
+      false
+    );
     const firstAddDir = fresh.args.indexOf("--add-dir");
     assert.deepEqual(fresh.args.slice(firstAddDir, firstAddDir + 4), [
       "--add-dir",
@@ -4107,13 +4105,11 @@ bunAdapterTest(
     const resumedPath = resumed.env?.PATH;
     assert.ok(resumedPath);
     assert.equal(resumed.args.includes("--add-dir"), false);
-    assert.deepEqual(resumed.args.slice(0, 5), [
-      "exec",
-      "-c",
-      "allow_login_shell=false",
-      "-c",
-      `shell_environment_policy.set.PATH=${JSON.stringify(resumedPath)}`
-    ]);
+    assert.deepEqual(resumed.args.slice(0, 3), ["exec", "-c", "allow_login_shell=false"]);
+    assert.equal(
+      resumed.args.some((arg) => arg.startsWith("shell_environment_policy.set.PATH=")),
+      false
+    );
     await resumed.cleanup?.();
   }
 );
